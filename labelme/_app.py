@@ -50,6 +50,7 @@ from ._shape_clipboard import ShapeClipboard
 from ._shape_color import resolve_shape_color
 from ._widgets import AiAssistedAnnotationWidget
 from ._widgets import AiTextToAnnotationWidget
+from ._widgets import BatchDeleteKeypointsDialog
 from ._widgets import BrightnessContrastDialog
 from ._widgets import Canvas
 from ._widgets import LabelDialog
@@ -152,6 +153,7 @@ class _Actions(NamedTuple):
     zoom: tuple[ZoomWidget | QtGui.QAction, ...]
     on_load_active: tuple[QtGui.QAction, ...]
     on_shapes_present: tuple[QtGui.QAction, ...]
+    batch_delete_keypoints: QtGui.QAction
     context_menu: tuple[QtGui.QAction, ...]
     edit_menu: tuple[QtGui.QAction | None, ...]
 
@@ -737,12 +739,22 @@ class MainWindow(QtWidgets.QMainWindow):
             add_point_to_edge,
             remove_point,
         )
+        batch_delete_keypoints = action(
+            text=self.tr("批量删除关键点…"),
+            slot=self._open_batch_delete_keypoints,
+            shortcut=shortcuts.get("batch_delete_keypoints", "Ctrl+Shift+D"),
+            icon="phosphor/trash.svg",
+            tip=self.tr("Batch delete keypoints across multiple files"),
+            enabled=True,
+        )
         edit_menu = (
             edit,
             duplicate,
             copy,
             paste,
             delete,
+            None,
+            batch_delete_keypoints,
             None,
             undo,
             undo_last_point,
@@ -802,6 +814,7 @@ class MainWindow(QtWidgets.QMainWindow):
             zoom=zoom,
             on_load_active=on_load_active,
             on_shapes_present=on_shapes_present,
+            batch_delete_keypoints=batch_delete_keypoints,
             context_menu=context_menu,
             edit_menu=edit_menu,
         )
@@ -2750,6 +2763,40 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.has_no_shapes():
             for action in self._actions.on_shapes_present:
                 action.setEnabled(False)
+
+    def _open_batch_delete_keypoints(self) -> None:
+        """Open the batch delete keypoints dialog."""
+        current_file: str | None = None
+        if self._image_path:
+            # Use the label file path, not the image path
+            current_file = _resolve_label_path(
+                image_or_label_path=self._image_path,
+                output_dir=self._output_dir,
+            )
+
+        # Build list of label files in current directory
+        file_list: list[str] = []
+        if self._image_path:
+            dir_path = Path(self._image_path).parent
+            for json_path in sorted(dir_path.glob("*.json")):
+                try:
+                    with open(json_path, encoding="utf-8") as fh:
+                        raw = json.load(fh)
+                    if "shapes" in raw and "imagePath" in raw:
+                        file_list.append(str(json_path))
+                except Exception:
+                    pass
+
+        dialog = BatchDeleteKeypointsDialog(
+            current_file=current_file,
+            file_list=file_list or None,
+            parent=self,
+        )
+        dialog.exec()
+
+        # Reload current file if it was modified
+        if self._image_path and self._label_file_path:
+            self._load_file(image_or_label_path=self._label_file_path)
 
     def copy_shape(self) -> None:
         self._canvas_widgets.canvas.end_move(copy=True)

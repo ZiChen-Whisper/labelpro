@@ -312,18 +312,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"About {__appname__}",
                 f"""
 <h3>{__appname__}</h3>
-<p>Image Polygonal Annotation with Python</p>
+<p>Image Annotation with Batch Keypoint Management</p>
 <p>Version: {__version__}</p>
-<p>Author: Kentaro Wada</p>
 <p>
-    <a href="https://labelme.io">Homepage</a> |
-    <a href="https://labelme.io/docs">Documentation</a> |
-    <a href="https://labelme.io/docs/troubleshoot">Troubleshooting</a>
+    <a href="https://github.com/ZiChen-Whisper/labelpro">GitHub</a>
 </p>
-<p>
-    <a href="https://github.com/wkentaro/labelme">GitHub</a> |
-    <a href="https://x.com/labelmeai">Twitter/X</a>
-</p>
+<p>Based on <a href="https://github.com/wkentaro/labelme">LabelMe</a></p>
 """,
             ),
         )
@@ -1019,7 +1013,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # XXX: Could be completely declarative.
         # Restore the window geometry and dock layout (separate from the user
         # Config; this Qt store holds only window state).
-        self._window_state = QtCore.QSettings("labelme", "labelme")
+        self._window_state = QtCore.QSettings("labelpro", "labelpro")
         #
         # Bump this when dock/toolbar layout changes to reset window state
         # for users upgrading from an older version.
@@ -1467,7 +1461,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mark_dirty()
 
     def tutorial(self) -> None:
-        url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
+        url = "https://github.com/ZiChen-Whisper/labelpro"  # NOQA
         webbrowser.open(url)
 
     def _on_drawing_polygon_changed(self, drawing: bool = True) -> None:

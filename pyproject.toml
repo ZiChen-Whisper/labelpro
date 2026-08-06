@@ -3,15 +3,13 @@ requires = ["hatchling>=1.20.0", "hatch-vcs", "hatch-fancy-pypi-readme"]
 build-backend = "hatchling.build"
 
 [project]
-name = "labelme"
-description = "Image annotation with Python."
+name = "labelpro"
+description = "Image annotation tool with batch keypoint management."
 license = { text = "GPL-3.0-only" }
 requires-python = ">=3.12"
-authors = [{ name = "Kentaro Wada", email = "www.kentaro.wada@gmail.com" }]
+authors = [{ name = "ZiChen-Whisper" }]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
-  "Intended Audience :: Developers",
-  "Intended Audience :: Science/Research",
+  "Development Status :: 4 - Beta",
   "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Operating System :: OS Independent",
   "Programming Language :: Python",
@@ -41,34 +39,21 @@ dynamic = ["readme", "version"]
 content-type = "text/markdown"
 fragments = [{ path = "README.md" }]
 
-[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
-pattern = 'src="(?!https?://)([^"]+)"'
-replacement = 'src="https://raw.githubusercontent.com/wkentaro/labelme/main/\1"'
-
 [tool.hatch.version]
 source = "vcs"
 
 [dependency-groups]
 dev = [
   "ipython",
-  "mdformat-frontmatter>=2.0.10",
-  "mdformat>=0.7",
   "pytest>=8.3.4",
   "pytest-cov>=7.1.0",
   "pytest-qt>=4.4.0",
   "pytest-xdist>=3.8.0",
   "ruff~=0.12.11",
-  "taplo>=0.9.3",
-  "twine>=6.1.0",
-  "ty>=0.0.31",
-  "types-pillow>=10.2.0.20240822",
-  "typos>=1.45.0",
-  "yamlfix>=1.19.1",
-  "mdformat-gfm>=1.0.0",
 ]
 
 [project.scripts]
-labelme = "labelme.__main__:main"
+labelpro = "labelme.__main__:main"
 
 [tool.pytest.ini_options]
 addopts = "-m 'not network'"
@@ -86,8 +71,6 @@ select = [
   "I",   # isort
   "UP",  # pyupgrade
 ]
-# UP040 wants PEP 695 `type X = ...`, but our Literal aliases are enumerated at
-# runtime via typing.get_args(), which returns () for a lazy `type` alias.
 ignore = ["UP040"]
 
 [tool.ruff.lint.isort]

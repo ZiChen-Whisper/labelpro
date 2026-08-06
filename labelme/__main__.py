@@ -55,13 +55,13 @@ def _setup_loguru(logger_level: str) -> None:
     # logging functional.
     try:
         if os.name == "nt":
-            cache_dir = Path(os.environ["LOCALAPPDATA"]) / "labelme"
+            cache_dir = Path(os.environ["LOCALAPPDATA"]) / "labelpro"
         else:
-            cache_dir = Path("~/.cache/labelme").expanduser()
+            cache_dir = Path("~/.cache/labelpro").expanduser()
 
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        log_file = cache_dir / "labelme.log"
+        log_file = cache_dir / "labelpro.log"
         logger.add(
             log_file,
             colorize=True,
@@ -143,7 +143,8 @@ def _handle_exception(
     QtWidgets.QMessageBox.critical(
         None,
         "Error",
-        f"An unexpected error occurred. The application will close.<br/><br/>Please report issues following the <a href='https://labelme.io/docs/troubleshoot'>Troubleshoot</a>.<br/><br/>{traceback_html}",  # noqa: E501
+        f"An unexpected error occurred. The application will close.<br/><br/>"
+        f"Please report issues on GitHub.<br/><br/>{traceback_html}",  # noqa: E501
     )
 
     if app := QtWidgets.QApplication.instance():

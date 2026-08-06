@@ -4,31 +4,44 @@
 
 ## 安装
 
-需要 Python 3.12+。
+**要求：Python 3.12 或更高版本。**
+
+### 方式一：使用 uv（推荐，自动管理 Python 版本）
 
 ```bash
+# 安装 uv（如果还没有）
+# Windows PowerShell:
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+# macOS / Linux:
+# curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # 克隆仓库
 git clone https://github.com/ZiChen-Whisper/labelpro.git
 cd labelpro
 
-# 安装依赖（使用 uv）
+# 安装依赖并运行
 uv sync
-
-# 或使用 pip
-pip install -e .
+uv run labelpro
 ```
 
-## 运行
+### 方式二：使用 pip
 
 ```bash
-# 使用 uv
-uv run labelpro
+git clone https://github.com/ZiChen-Whisper/labelpro.git
+cd labelpro
 
-# 或直接运行
+# 确保 Python >= 3.12
+python --version
+
+# 安装
+pip install -e .
+
+# 运行
 labelpro
 ```
 
-启动后打开图片或文件夹即可开始标注。
+> 如果 `pip install -e .` 报错，检查 Python 版本是否 >= 3.12。
+> 可以用 `conda create -n labelpro python=3.12 -y && conda activate labelpro` 创建新环境。
 
 ### 命令行参数
 

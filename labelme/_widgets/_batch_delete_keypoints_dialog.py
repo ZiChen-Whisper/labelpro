@@ -21,10 +21,10 @@ from .._label_file import read_label_file
 from .._shape import Shape
 from .._shape import ShapeType
 
-
 # ---------------------------------------------------------------------------
 #  Data helpers
 # ---------------------------------------------------------------------------
+
 
 class _GroupInfo(NamedTuple):
     group_id: int
@@ -86,6 +86,13 @@ def _shapes_from_dicts(shape_dicts: list) -> list[Shape]:
     return shapes
 
 
+def _read_shapes_fast(json_path: Path) -> list[dict]:
+    """Read raw shape dicts from JSON without loading image data. Fast."""
+    with open(json_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return data.get("shapes", [])
+
+
 def _read_shapes(json_path: Path) -> list[Shape]:
     """Read shapes from a LabelMe JSON file, returning Shape objects."""
     annotation = read_label_file(str(json_path))
@@ -113,17 +120,16 @@ def _compute_groups(shapes: list[Shape]) -> list[_GroupInfo]:
 
 def _collect_point_labels(shapes: list[Shape]) -> list[str]:
     """Return sorted unique labels from point-type shapes."""
-    labels = sorted({
-        s.label
-        for s in shapes
-        if s.shape_type == "point" and s.label is not None
-    })
+    labels = sorted(
+        {s.label for s in shapes if s.shape_type == "point" and s.label is not None}
+    )
     return labels
 
 
 # ---------------------------------------------------------------------------
 #  Preview canvas (QGraphicsView-based)
 # ---------------------------------------------------------------------------
+
 
 class _PreviewScene(QtWidgets.QGraphicsScene):
     """Scene holding the pixmap and overlay items."""
@@ -167,9 +173,7 @@ class _PreviewView(QtWidgets.QGraphicsView):
         self.setTransformationAnchor(
             QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse
         )
-        self.setResizeAnchor(
-            QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse
-        )
+        self.setResizeAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(30, 30, 30)))
@@ -211,7 +215,7 @@ class _PreviewView(QtWidgets.QGraphicsView):
 # ---------------------------------------------------------------------------
 
 GROUP_COLORS: list[tuple[int, int, int]] = [
-    (0, 200, 0),    # green
+    (0, 200, 0),  # green
     (220, 50, 50),  # red
     (50, 50, 220),  # blue
     (220, 150, 0),  # orange
@@ -244,6 +248,7 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         self._selected_stems: set[str] = set()
         self._current_entry: _FileEntry | None = None
         self._current_shapes: list[Shape] = []
+        self._current_image_path: str | None = None  # cached for preview
         self._groups: list[_GroupInfo] = []
         self._target_group_id: int | None = None  # None = all groups
         self._all_point_labels: list[str] = []
@@ -276,6 +281,8 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
                         break
             self._navigate_to(start_idx)
             self._refresh_labels()
+        else:
+            self._frame_label.setText("未找到标注文件")
 
     # ------------------------------------------------------------------
     #  UI construction
@@ -402,7 +409,10 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             self._navigate_relative(1)
         elif event.key() == Qt.Key.Key_A and not event.modifiers():
             self._navigate_relative(-1)
-        elif event.key() == Qt.Key.Key_F and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        elif (
+            event.key() == Qt.Key.Key_F
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
             self._preview.fit_image()
         else:
             super().keyPressEvent(event)
@@ -497,12 +507,25 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         if self._current_entry is None:
             return
         try:
-            self._current_shapes = _read_shapes(self._current_entry.path)
+            annotation = read_label_file(str(self._current_entry.path))
+            self._current_shapes = _shapes_from_dicts(annotation.shapes)
+            self._current_image_path = _find_image(
+                self._current_entry.path, annotation.image_path
+            )
         except Exception:
             self._current_shapes = []
+            self._current_image_path = None
 
     def _refresh_groups(self) -> None:
-        """Rebuild group radio buttons."""
+        """Rebuild group radio buttons, preserving previous selection if possible."""
+        prev_gid = self._target_group_id
+        prev_rank: int | None = None
+        if prev_gid is not None:
+            for i, gi in enumerate(self._groups):
+                if gi.group_id == prev_gid:
+                    prev_rank = i
+                    break
+
         # Clear old buttons
         for btn in self._group_buttons:
             self._group_button_group.removeButton(btn)
@@ -515,19 +538,35 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
 
         # "All groups" option
         all_btn = QtWidgets.QRadioButton(f"所有组（共 {n} 组）")
-        all_btn.setChecked(True)
         self._group_button_group.addButton(all_btn, -1)
         self._group_layout.addWidget(all_btn)
         self._group_buttons.append(all_btn)
 
+        target_id: int = -1  # default: all groups
         for rank, gi in enumerate(self._groups, 1):
             label = f"左侧第 {rank}/{n} 组  (group_id={gi.group_id})"
             btn = QtWidgets.QRadioButton(label)
             self._group_button_group.addButton(btn, gi.group_id)
             self._group_layout.addWidget(btn)
             self._group_buttons.append(btn)
+            # Preserve: same group_id match
+            if prev_gid is not None and gi.group_id == prev_gid:
+                target_id = gi.group_id
+            # Preserve: same rank match (if gid doesn't exist in new file)
+            if target_id == -1 and prev_rank is not None and rank - 1 == prev_rank:
+                target_id = gi.group_id
 
-        self._target_group_id = None
+        if target_id == -1:
+            all_btn.setChecked(True)
+            self._target_group_id = None
+        else:
+            btn_to_check = self._group_button_group.button(target_id)
+            if btn_to_check is not None:
+                btn_to_check.setChecked(True)
+                self._target_group_id = target_id
+            else:
+                all_btn.setChecked(True)
+                self._target_group_id = None
 
     def _refresh_labels(self) -> None:
         """Collect point labels from all selected files and rebuild checkboxes."""
@@ -537,14 +576,16 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             cb.deleteLater()
         self._label_checkboxes.clear()
 
-        # Collect from all selected files
+        # Collect from all selected files (fast read, no image data)
         all_labels: set[str] = set()
         for entry in self._file_entries:
             if entry.stem not in self._selected_stems:
                 continue
             try:
-                shapes = _read_shapes(entry.path)
-                all_labels.update(_collect_point_labels(shapes))
+                raw_shapes = _read_shapes_fast(entry.path)
+                for s in raw_shapes:
+                    if s.get("shape_type") == "point" and s.get("label"):
+                        all_labels.add(s["label"])
             except Exception:
                 pass
 
@@ -552,7 +593,9 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         for lab in self._all_point_labels:
             cb = QtWidgets.QCheckBox(lab)
             cb.setChecked(lab in self._delete_labels)
-            cb.toggled.connect(lambda checked, l=lab: self._on_label_toggled(l, checked))
+            cb.toggled.connect(
+                lambda checked, label=lab: self._on_label_toggled(label, checked)
+            )
             self._label_check_layout.addWidget(cb)
             self._label_checkboxes[lab] = cb
 
@@ -563,14 +606,23 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             self._delete_labels.add(label)
         else:
             self._delete_labels.discard(label)
+        self._refresh_preview()
 
     def _select_all_labels(self) -> None:
+        self._label_check_widget.blockSignals(True)
         for cb in self._label_checkboxes.values():
             cb.setChecked(True)
+        self._label_check_widget.blockSignals(False)
+        self._delete_labels = set(self._all_point_labels)
+        self._refresh_preview()
 
     def _deselect_all_labels(self) -> None:
+        self._label_check_widget.blockSignals(True)
         for cb in self._label_checkboxes.values():
             cb.setChecked(False)
+        self._label_check_widget.blockSignals(False)
+        self._delete_labels.clear()
+        self._refresh_preview()
 
     def _on_group_changed(self, gid: int, checked: bool = True) -> None:
         if not checked:
@@ -589,19 +641,11 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         if self._current_entry is None:
             return
 
-        try:
-            shapes = _read_shapes(self._current_entry.path)
-            annotation = read_label_file(str(self._current_entry.path))
-        except Exception:
-            shapes = []
-            annotation = None
+        shapes = self._current_shapes
 
-        # Load image using annotation's image_path
-        img_path = None
-        if annotation is not None:
-            img_path = _find_image(self._current_entry.path, annotation.image_path)
-        if img_path:
-            pixmap = QtGui.QPixmap(img_path)
+        # Load image using cached path
+        if self._current_image_path and Path(self._current_image_path).exists():
+            pixmap = QtGui.QPixmap(self._current_image_path)
         else:
             pixmap = QtGui.QPixmap(1920, 1080)
             pixmap.fill(QtGui.QColor(40, 40, 40))
@@ -620,10 +664,7 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
                 continue
 
             gid = shape.group_id
-            is_target = (
-                target_gid is None
-                or (gid is not None and gid == target_gid)
-            )
+            is_target = target_gid is None or (gid is not None and gid == target_gid)
 
             # Color
             if is_target:
@@ -648,35 +689,92 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         self, shape: Shape, color: tuple[int, int, int], is_target: bool
     ) -> None:
         r, g, b = color
-        pen = QtGui.QPen(QtGui.QColor(r, g, b))
+        qcolor = QtGui.QColor(r, g, b)
+        pen = QtGui.QPen(qcolor)
         pen_width = 3 if is_target else 1
         pen.setWidth(pen_width)
 
-        if shape.shape_type == "rectangle" and len(shape.points) >= 2:
-            x1, y1 = shape.points[0]
-            x2, y2 = shape.points[1]
+        pts = shape.points
+        n_pts = len(pts)
+
+        if shape.shape_type == "rectangle" and n_pts >= 2:
+            x1, y1 = pts[0]
+            x2, y2 = pts[1]
             x1, x2 = min(x1, x2), max(x1, x2)
             y1, y2 = min(y1, y2), max(y1, y2)
             rect = QtCore.QRectF(x1, y1, x2 - x1, y2 - y1)
             item = self._preview._scene.addRect(rect, pen)
             self._preview.add_overlay_item(item)
 
-        elif shape.shape_type == "point" and len(shape.points) >= 1:
-            x, y = shape.points[0]
+        elif shape.shape_type == "point" and n_pts >= 1:
+            x, y = pts[0]
             r_size = 5 if is_target else 3
             ellipse = QtCore.QRectF(x - r_size, y - r_size, r_size * 2, r_size * 2)
-            brush = QtGui.QBrush(QtGui.QColor(r, g, b))
+            brush = QtGui.QBrush(qcolor)
             item = self._preview._scene.addEllipse(ellipse, pen, brush)
             self._preview.add_overlay_item(item)
 
-            # Label text
             if shape.label:
                 text_item = self._preview._scene.addSimpleText(
                     shape.label, QtGui.QFont("sans-serif", 8)
                 )
                 text_item.setPos(x + 4, y - 12)
-                text_item.setBrush(QtGui.QBrush(QtGui.QColor(r, g, b)))
+                text_item.setBrush(QtGui.QBrush(qcolor))
                 self._preview.add_overlay_item(text_item)
+
+        elif shape.shape_type == "polygon" and n_pts >= 2:
+            polygon = QtGui.QPolygonF([QtCore.QPointF(p[0], p[1]) for p in pts])
+            brush = QtGui.QBrush(QtGui.QColor(r, g, b, 40))
+            item = self._preview._scene.addPolygon(polygon, pen, brush)
+            self._preview.add_overlay_item(item)
+
+        elif shape.shape_type == "circle" and n_pts >= 2:
+            cx, cy = pts[0]
+            px, py = pts[1]
+            d = np.sqrt((cx - px) ** 2 + (cy - py) ** 2)
+            rect = QtCore.QRectF(cx - d, cy - d, d * 2, d * 2)
+            item = self._preview._scene.addEllipse(rect, pen)
+            self._preview.add_overlay_item(item)
+
+        elif shape.shape_type == "line" and n_pts >= 2:
+            line = QtCore.QLineF(
+                QtCore.QPointF(pts[0][0], pts[0][1]),
+                QtCore.QPointF(pts[1][0], pts[1][1]),
+            )
+            item = self._preview._scene.addLine(line, pen)
+            self._preview.add_overlay_item(item)
+
+        elif shape.shape_type == "linestrip" and n_pts >= 2:
+            path = QtGui.QPainterPath()
+            path.moveTo(pts[0][0], pts[0][1])
+            for p in pts[1:]:
+                path.lineTo(p[0], p[1])
+            item = self._preview._scene.addPath(path, pen)
+            self._preview.add_overlay_item(item)
+
+        elif shape.shape_type == "oriented_rectangle" and n_pts >= 4:
+            polygon = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(pts[0][0], pts[0][1]),
+                    QtCore.QPointF(pts[1][0], pts[1][1]),
+                    QtCore.QPointF(pts[2][0], pts[2][1]),
+                    QtCore.QPointF(pts[3][0], pts[3][1]),
+                ]
+            )
+            item = self._preview._scene.addPolygon(polygon, pen)
+            self._preview.add_overlay_item(item)
+
+        elif shape.shape_type == "mask" and n_pts >= 2:
+            x1, y1 = pts[0]
+            x2, y2 = pts[1]
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
+            rect = QtCore.QRectF(x1, y1, x2 - x1, y2 - y1)
+            dash_pen = QtGui.QPen(qcolor)
+            dash_pen.setWidth(pen_width)
+            dash_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+            item = self._preview._scene.addRect(rect, dash_pen)
+            self._preview.add_overlay_item(item)
 
     # ------------------------------------------------------------------
     #  Batch execution
@@ -689,7 +787,9 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             return
 
         if not self._delete_labels:
-            QtWidgets.QMessageBox.warning(self, "提示", "请至少选择一个要删除的关键点标签")
+            QtWidgets.QMessageBox.warning(
+                self, "提示", "请至少选择一个要删除的关键点标签"
+            )
             return
 
         target_gid = self._target_group_id  # None = all groups
@@ -705,7 +805,9 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             f"原始文件将被直接修改。确定执行？"
         )
         reply = QtWidgets.QMessageBox.question(
-            self, "确认批量删除", msg,
+            self,
+            "确认批量删除",
+            msg,
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
         )
@@ -716,7 +818,19 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         skipped = 0
         errors: list[str] = []
 
-        for entry in selected:
+        progress = QtWidgets.QProgressDialog(
+            "正在批量删除关键点…", "取消", 0, len(selected), self
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(500)
+
+        for i, entry in enumerate(selected):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+            progress.setLabelText(f"处理中: {entry.stem}  ({i + 1}/{len(selected)})")
+            QtWidgets.QApplication.processEvents()
+
             try:
                 with open(entry.path, encoding="utf-8") as fh:
                     data = json.load(fh)
@@ -764,8 +878,9 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
 
         QtWidgets.QMessageBox.information(self, "完成", result_msg)
 
+        progress.setValue(len(selected))
+
         # Refresh preview after delete
         self._load_current_file()
         self._refresh_groups()
         self._refresh_preview()
-

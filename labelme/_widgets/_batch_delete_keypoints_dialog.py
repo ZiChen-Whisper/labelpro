@@ -141,6 +141,7 @@ class _PreviewScene(QtWidgets.QGraphicsScene):
 
     def set_image(self, pixmap: QtGui.QPixmap) -> None:
         self.clear()
+        self._overlay_items.clear()
         self._pixmap_item = self.addPixmap(pixmap)
         self.setSceneRect(QtCore.QRectF(pixmap.rect()))
 

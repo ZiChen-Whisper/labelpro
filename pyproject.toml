@@ -42,6 +42,9 @@ fragments = [{ path = "README.md" }]
 [tool.hatch.version]
 source = "vcs"
 
+[tool.hatch.build.targets.wheel]
+packages = ["labelme"]
+
 [dependency-groups]
 dev = [
   "ipython",

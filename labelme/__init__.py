@@ -10,4 +10,8 @@ __appname__ = "LabelPro"
 __version__ = importlib.metadata.version("labelpro")
 
 # XXX: has to be imported before PySide6 to load dlls in order on Windows
-import onnxruntime  # noqa: E402
+# https://github.com/wkentaro/labelme/issues/1564
+try:
+    import onnxruntime  # noqa: E402
+except ImportError:
+    pass  # AI features will be unavailable; core annotation still works

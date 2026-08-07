@@ -93,12 +93,6 @@ def _read_shapes_fast(json_path: Path) -> list[dict]:
     return data.get("shapes", [])
 
 
-def _read_shapes(json_path: Path) -> list[Shape]:
-    """Read shapes from a LabelMe JSON file, returning Shape objects."""
-    annotation = read_label_file(str(json_path))
-    return _shapes_from_dicts(annotation.shapes)
-
-
 def _compute_groups(shapes: list[Shape]) -> list[_GroupInfo]:
     """Compute groups sorted by center X (left to right)."""
     groups: dict[int, list[float]] = {}
@@ -116,14 +110,6 @@ def _compute_groups(shapes: list[Shape]) -> list[_GroupInfo]:
     ]
     result.sort(key=lambda g: g.center_x)
     return result
-
-
-def _collect_point_labels(shapes: list[Shape]) -> list[str]:
-    """Return sorted unique labels from point-type shapes."""
-    labels = sorted(
-        {s.label for s in shapes if s.shape_type == "point" and s.label is not None}
-    )
-    return labels
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +142,7 @@ class _PreviewScene(QtWidgets.QGraphicsScene):
 
 
 class _PreviewView(QtWidgets.QGraphicsView):
-    """Zoomable / pannable image preview."""
+    """Zoomable / pannable image preview, matching main canvas interaction."""
 
     zoom_changed = QtCore.Signal(float)
 
@@ -174,11 +160,12 @@ class _PreviewView(QtWidgets.QGraphicsView):
         self.setTransformationAnchor(
             QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse
         )
-        self.setResizeAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setResizeAnchor(
+            QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse
+        )
         self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(30, 30, 30)))
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._zoom_level: float = 1.0
 
     def set_preview_image(self, pixmap: QtGui.QPixmap) -> None:
@@ -194,13 +181,25 @@ class _PreviewView(QtWidgets.QGraphicsView):
         return self._zoom_level
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
-        delta = event.angleDelta().y()
-        factor = self._ZOOM_FACTOR if delta > 0 else 1.0 / self._ZOOM_FACTOR
-        new_zoom = self._zoom_level * factor
-        if self._MIN_ZOOM <= new_zoom <= self._MAX_ZOOM:
-            self.scale(factor, factor)
-            self._zoom_level = new_zoom
-            self.zoom_changed.emit(self._zoom_level)
+        """Match main canvas: Ctrl+wheel=zoom, Shift+wheel=h-scroll, plain=v-scroll."""
+        mods = event.modifiers()
+        delta = event.angleDelta()
+        if mods == Qt.KeyboardModifier.ControlModifier:
+            # Ctrl + wheel → zoom
+            factor = self._ZOOM_FACTOR if delta.y() > 0 else 1.0 / self._ZOOM_FACTOR
+            new_zoom = self._zoom_level * factor
+            if self._MIN_ZOOM <= new_zoom <= self._MAX_ZOOM:
+                self.scale(factor, factor)
+                self._zoom_level = new_zoom
+                self.zoom_changed.emit(self._zoom_level)
+        elif mods == Qt.KeyboardModifier.ShiftModifier:
+            # Shift + wheel → horizontal scroll
+            sb = self.horizontalScrollBar()
+            sb.setValue(sb.value() - delta.y())
+        else:
+            # Plain wheel → vertical scroll
+            sb = self.verticalScrollBar()
+            sb.setValue(sb.value() - delta.y())
         event.accept()
 
     def fit_image(self) -> None:
@@ -228,6 +227,8 @@ GROUP_COLORS: list[tuple[int, int, int]] = [
 HIGHLIGHT_COLOR: tuple[int, int, int] = (255, 60, 60)
 GHOST_COLOR: tuple[int, int, int] = (80, 80, 80)
 
+_LABEL_REFRESH_DEBOUNCE_MS: int = 300
+
 
 class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
     """Batch delete keypoints across multiple annotation files."""
@@ -249,11 +250,17 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         self._selected_stems: set[str] = set()
         self._current_entry: _FileEntry | None = None
         self._current_shapes: list[Shape] = []
-        self._current_image_path: str | None = None  # cached for preview
+        self._current_image_path: str | None = None
         self._groups: list[_GroupInfo] = []
-        self._target_group_id: int | None = None  # None = all groups
+        self._target_group_id: int | None = None
         self._all_point_labels: list[str] = []
         self._delete_labels: set[str] = set()
+
+        # Debounce timer for label refresh
+        self._label_refresh_timer = QtCore.QTimer(self)
+        self._label_refresh_timer.setSingleShot(True)
+        self._label_refresh_timer.setInterval(_LABEL_REFRESH_DEBOUNCE_MS)
+        self._label_refresh_timer.timeout.connect(self._do_refresh_labels)
 
         # If a file list is given, use it; otherwise scan the current file's dir
         if file_list:
@@ -272,7 +279,6 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         # Load initial state
         if self._file_entries:
             self._refresh_file_list()
-            # Find current file index to start at
             start_idx = 0
             if current_file:
                 cur_stem = Path(current_file).stem
@@ -281,7 +287,7 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
                         start_idx = i
                         break
             self._navigate_to(start_idx)
-            self._refresh_labels()
+            self._schedule_label_refresh()
         else:
             self._frame_label.setText("未找到标注文件")
 
@@ -319,30 +325,19 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         right_panel = QtWidgets.QVBoxLayout()
         right_panel.setSpacing(8)
 
-        # File list
-        file_group = QtWidgets.QGroupBox("文件列表")
-        file_layout = QtWidgets.QVBoxLayout(file_group)
-
-        file_btn_row = QtWidgets.QHBoxLayout()
-        self._select_all_btn = QtWidgets.QPushButton("全选")
-        self._select_all_btn.clicked.connect(self._select_all_files)
-        file_btn_row.addWidget(self._select_all_btn)
-
-        self._deselect_all_btn = QtWidgets.QPushButton("取消全选")
-        self._deselect_all_btn.clicked.connect(self._deselect_all_files)
-        file_btn_row.addWidget(self._deselect_all_btn)
-
-        file_layout.addLayout(file_btn_row)
+        # File list (no 全选/取消全选 buttons; Ctrl+A via keyboard)
+        self._file_group = QtWidgets.QGroupBox("文件列表（Ctrl+A 全选，Ctrl/Shift 多选）")
+        file_layout = QtWidgets.QVBoxLayout(self._file_group)
 
         self._file_list = QtWidgets.QListWidget()
         self._file_list.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self._file_list.itemChanged.connect(self._on_file_check_changed)
         self._file_list.itemClicked.connect(self._on_file_clicked)
         file_layout.addWidget(self._file_list)
 
-        right_panel.addWidget(file_group, 2)
+        right_panel.addWidget(self._file_group, 2)
 
         # Group selection
         self._group_group = QtWidgets.QGroupBox("目标组（按水平位置从左到右排序）")
@@ -353,21 +348,13 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         self._group_button_group.idToggled.connect(self._on_group_changed)
         right_panel.addWidget(self._group_group, 1)
 
-        # Label selection
-        self._label_group = QtWidgets.QGroupBox("要删除的关键点标签")
+        # Label selection (no 全选/取消全选 buttons; Ctrl+A via keyboard)
+        self._label_group = QtWidgets.QGroupBox("选择要删除的关键点（Ctrl+A 全选）")
         label_outer = QtWidgets.QVBoxLayout(self._label_group)
-
-        label_btn_row = QtWidgets.QHBoxLayout()
-        self._select_all_labels_btn = QtWidgets.QPushButton("全选")
-        self._select_all_labels_btn.clicked.connect(self._select_all_labels)
-        label_btn_row.addWidget(self._select_all_labels_btn)
-        self._deselect_all_labels_btn = QtWidgets.QPushButton("取消全选")
-        self._deselect_all_labels_btn.clicked.connect(self._deselect_all_labels)
-        label_btn_row.addWidget(self._deselect_all_labels_btn)
-        label_outer.addLayout(label_btn_row)
 
         self._label_scroll = QtWidgets.QScrollArea()
         self._label_scroll.setWidgetResizable(True)
+        self._label_scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._label_check_widget = QtWidgets.QWidget()
         self._label_check_layout = QtWidgets.QVBoxLayout(self._label_check_widget)
         self._label_check_layout.setContentsMargins(0, 0, 0, 0)
@@ -411,8 +398,20 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         elif event.key() == Qt.Key.Key_A and not event.modifiers():
             self._navigate_relative(-1)
         elif (
+            event.key() == Qt.Key.Key_A
+            and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+        ):
+            # Ctrl+A: select all in whichever list has focus
+            focused = QtWidgets.QApplication.focusWidget()
+            if focused is self._file_list:
+                self._select_all_files()
+            elif focused is self._label_scroll or any(
+                cb.hasFocus() for cb in self._label_checkboxes.values()
+            ):
+                self._select_all_labels()
+        elif (
             event.key() == Qt.Key.Key_F
-            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and event.modifiers() == Qt.KeyboardModifier.ControlModifier
         ):
             self._preview.fit_image()
         else:
@@ -441,12 +440,12 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
     def _select_all_files(self) -> None:
         self._selected_stems = {e.stem for e in self._file_entries}
         self._refresh_file_list()
-        self._refresh_labels()
+        self._schedule_label_refresh()
 
     def _deselect_all_files(self) -> None:
         self._selected_stems.clear()
         self._refresh_file_list()
-        self._refresh_labels()
+        self._schedule_label_refresh()
 
     def _on_file_check_changed(self, item: QtWidgets.QListWidgetItem) -> None:
         """Sync checkbox state without navigating."""
@@ -457,7 +456,7 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             self._selected_stems.add(entry.stem)
         else:
             self._selected_stems.discard(entry.stem)
-        self._refresh_labels()
+        self._schedule_label_refresh()
 
     def _on_file_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
         """Navigate to clicked file."""
@@ -466,110 +465,14 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             self._navigate_to(row)
 
     # ------------------------------------------------------------------
-    #  Navigation
+    #  Label refresh (debounced)
     # ------------------------------------------------------------------
 
-    def _navigate_to(self, index: int) -> None:
-        if index < 0 or index >= len(self._file_entries):
-            return
-        self._current_entry = self._file_entries[index]
-        self._file_list.blockSignals(True)
-        self._file_list.setCurrentRow(index)
-        self._file_list.blockSignals(False)
+    def _schedule_label_refresh(self) -> None:
+        """Debounce label refresh to avoid scanning all files on every click."""
+        self._label_refresh_timer.start()
 
-        self._load_current_file()
-        self._refresh_groups()
-        self._refresh_preview()
-        self._update_frame_label()
-
-    def _navigate_relative(self, delta: int) -> None:
-        if self._current_entry is None:
-            return
-        for i, e in enumerate(self._file_entries):
-            if e.stem == self._current_entry.stem:
-                new_idx = max(0, min(len(self._file_entries) - 1, i + delta))
-                self._navigate_to(new_idx)
-                return
-
-    def _update_frame_label(self) -> None:
-        if self._current_entry is None:
-            self._frame_label.setText("0 / 0")
-            return
-        for i, e in enumerate(self._file_entries):
-            if e.stem == self._current_entry.stem:
-                self._frame_label.setText(f"{i + 1} / {len(self._file_entries)}")
-                return
-
-    # ------------------------------------------------------------------
-    #  Data loading
-    # ------------------------------------------------------------------
-
-    def _load_current_file(self) -> None:
-        if self._current_entry is None:
-            return
-        try:
-            annotation = read_label_file(str(self._current_entry.path))
-            self._current_shapes = _shapes_from_dicts(annotation.shapes)
-            self._current_image_path = _find_image(
-                self._current_entry.path, annotation.image_path
-            )
-        except Exception:
-            self._current_shapes = []
-            self._current_image_path = None
-
-    def _refresh_groups(self) -> None:
-        """Rebuild group radio buttons, preserving previous selection if possible."""
-        prev_gid = self._target_group_id
-        prev_rank: int | None = None
-        if prev_gid is not None:
-            for i, gi in enumerate(self._groups):
-                if gi.group_id == prev_gid:
-                    prev_rank = i
-                    break
-
-        # Clear old buttons
-        for btn in self._group_buttons:
-            self._group_button_group.removeButton(btn)
-            self._group_layout.removeWidget(btn)
-            btn.deleteLater()
-        self._group_buttons.clear()
-
-        self._groups = _compute_groups(self._current_shapes)
-        n = len(self._groups)
-
-        # "All groups" option
-        all_btn = QtWidgets.QRadioButton(f"所有组（共 {n} 组）")
-        self._group_button_group.addButton(all_btn, -1)
-        self._group_layout.addWidget(all_btn)
-        self._group_buttons.append(all_btn)
-
-        target_id: int = -1  # default: all groups
-        for rank, gi in enumerate(self._groups, 1):
-            label = f"左侧第 {rank}/{n} 组  (group_id={gi.group_id})"
-            btn = QtWidgets.QRadioButton(label)
-            self._group_button_group.addButton(btn, gi.group_id)
-            self._group_layout.addWidget(btn)
-            self._group_buttons.append(btn)
-            # Preserve: same group_id match
-            if prev_gid is not None and gi.group_id == prev_gid:
-                target_id = gi.group_id
-            # Preserve: same rank match (if gid doesn't exist in new file)
-            if target_id == -1 and prev_rank is not None and rank - 1 == prev_rank:
-                target_id = gi.group_id
-
-        if target_id == -1:
-            all_btn.setChecked(True)
-            self._target_group_id = None
-        else:
-            btn_to_check = self._group_button_group.button(target_id)
-            if btn_to_check is not None:
-                btn_to_check.setChecked(True)
-                self._target_group_id = target_id
-            else:
-                all_btn.setChecked(True)
-                self._target_group_id = None
-
-    def _refresh_labels(self) -> None:
+    def _do_refresh_labels(self) -> None:
         """Collect point labels from all selected files and rebuild checkboxes."""
         # Clear old
         for cb in self._label_checkboxes.values():
@@ -635,6 +538,106 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         self._zoom_label.setText(f"{int(zoom * 100)}%")
 
     # ------------------------------------------------------------------
+    #  Navigation
+    # ------------------------------------------------------------------
+
+    def _navigate_to(self, index: int) -> None:
+        if index < 0 or index >= len(self._file_entries):
+            return
+        self._current_entry = self._file_entries[index]
+        self._file_list.blockSignals(True)
+        self._file_list.setCurrentRow(index)
+        self._file_list.blockSignals(False)
+
+        self._load_current_file()
+        self._refresh_groups()
+        self._refresh_preview()
+        self._update_frame_label()
+
+    def _navigate_relative(self, delta: int) -> None:
+        if self._current_entry is None:
+            return
+        for i, e in enumerate(self._file_entries):
+            if e.stem == self._current_entry.stem:
+                new_idx = max(0, min(len(self._file_entries) - 1, i + delta))
+                self._navigate_to(new_idx)
+                return
+
+    def _update_frame_label(self) -> None:
+        if self._current_entry is None:
+            self._frame_label.setText("0 / 0")
+            return
+        for i, e in enumerate(self._file_entries):
+            if e.stem == self._current_entry.stem:
+                self._frame_label.setText(f"{i + 1} / {len(self._file_entries)}")
+                return
+
+    # ------------------------------------------------------------------
+    #  Data loading
+    # ------------------------------------------------------------------
+
+    def _load_current_file(self) -> None:
+        if self._current_entry is None:
+            return
+        try:
+            annotation = read_label_file(str(self._current_entry.path))
+            self._current_shapes = _shapes_from_dicts(annotation.shapes)
+            self._current_image_path = _find_image(
+                self._current_entry.path, annotation.image_path
+            )
+        except Exception:
+            self._current_shapes = []
+            self._current_image_path = None
+
+    def _refresh_groups(self) -> None:
+        """Rebuild group radio buttons, preserving previous selection if possible."""
+        prev_gid = self._target_group_id
+        prev_rank: int | None = None
+        if prev_gid is not None:
+            for i, gi in enumerate(self._groups):
+                if gi.group_id == prev_gid:
+                    prev_rank = i
+                    break
+
+        for btn in self._group_buttons:
+            self._group_button_group.removeButton(btn)
+            self._group_layout.removeWidget(btn)
+            btn.deleteLater()
+        self._group_buttons.clear()
+
+        self._groups = _compute_groups(self._current_shapes)
+        n = len(self._groups)
+
+        all_btn = QtWidgets.QRadioButton(f"所有组（共 {n} 组）")
+        self._group_button_group.addButton(all_btn, -1)
+        self._group_layout.addWidget(all_btn)
+        self._group_buttons.append(all_btn)
+
+        target_id: int = -1
+        for rank, gi in enumerate(self._groups, 1):
+            label = f"左侧第 {rank}/{n} 组"
+            btn = QtWidgets.QRadioButton(label)
+            self._group_button_group.addButton(btn, gi.group_id)
+            self._group_layout.addWidget(btn)
+            self._group_buttons.append(btn)
+            if prev_gid is not None and gi.group_id == prev_gid:
+                target_id = gi.group_id
+            if target_id == -1 and prev_rank is not None and rank - 1 == prev_rank:
+                target_id = gi.group_id
+
+        if target_id == -1:
+            all_btn.setChecked(True)
+            self._target_group_id = None
+        else:
+            btn_to_check = self._group_button_group.button(target_id)
+            if btn_to_check is not None:
+                btn_to_check.setChecked(True)
+                self._target_group_id = target_id
+            else:
+                all_btn.setChecked(True)
+                self._target_group_id = None
+
+    # ------------------------------------------------------------------
     #  Preview
     # ------------------------------------------------------------------
 
@@ -644,7 +647,6 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
 
         shapes = self._current_shapes
 
-        # Load image using cached path
         if self._current_image_path and Path(self._current_image_path).exists():
             pixmap = QtGui.QPixmap(self._current_image_path)
         else:
@@ -652,12 +654,10 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             pixmap.fill(QtGui.QColor(40, 40, 40))
 
         self._preview.set_preview_image(pixmap)
-        self._preview.clear_overlays()
 
         groups = _compute_groups(shapes)
         target_gid = self._target_group_id
 
-        # Draw each shape
         for shape in shapes:
             if shape.shape_type == "point" and len(shape.points) == 0:
                 continue
@@ -667,12 +667,10 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
             gid = shape.group_id
             is_target = target_gid is None or (gid is not None and gid == target_gid)
 
-            # Color
             if is_target:
                 if shape.label in self._delete_labels:
                     color = HIGHLIGHT_COLOR
                 else:
-                    # Find rank for this group
                     rank = 0
                     for i, gi in enumerate(groups):
                         if gi.group_id == gid:
@@ -789,11 +787,11 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
 
         if not self._delete_labels:
             QtWidgets.QMessageBox.warning(
-                self, "提示", "请至少选择一个要删除的关键点标签"
+                self, "提示", "请至少选择一种要删除的关键点"
             )
             return
 
-        target_gid = self._target_group_id  # None = all groups
+        target_gid = self._target_group_id
         n_sel = len(selected)
         n_labels = len(self._delete_labels)
         labels_str = "、".join(sorted(self._delete_labels))
@@ -802,7 +800,7 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
         msg = (
             f"将对 {n_sel} 个文件执行批量删除:\n\n"
             f"  目标组: {gid_str}\n"
-            f"  删除标签 ({n_labels} 个): {labels_str}\n\n"
+            f"  删除的关键点 ({n_labels} 种): {labels_str}\n\n"
             f"原始文件将被直接修改。确定执行？"
         )
         reply = QtWidgets.QMessageBox.question(
@@ -843,7 +841,6 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
                     s_label = s.get("label", "")
                     s_type = s.get("shape_type", "")
 
-                    # Check if this shape should be deleted
                     should_delete = (
                         s_type == "point"
                         and s_label in self._delete_labels
@@ -881,7 +878,7 @@ class BatchDeleteKeypointsDialog(QtWidgets.QDialog):
 
         progress.setValue(len(selected))
 
-        # Refresh preview after delete
         self._load_current_file()
         self._refresh_groups()
         self._refresh_preview()
+
